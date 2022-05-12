@@ -8,10 +8,15 @@
  * Serial message definitions
  */
 
-#define ATR_PROTOCOL_MAX_BUF_SIZE   64
+#define ATR_PROTOCOL_MAX_BUF_SIZE   128
 
+// Receiving messages
 char msgBuf[ATR_PROTOCOL_MAX_BUF_SIZE];
 int msgBufPnt = 0;
+
+// Sedning messages
+char outboundMsgBuf[ATR_PROTOCOL_MAX_BUF_SIZE];
+int outboundMsgBufPnt = 0;
 
 /*
  * OLED Variables
@@ -41,7 +46,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 /*
  * Robot location variables
  */
-float xLocation, yLocation;
+int xLocation, yLocation;
 
 /*
  * Joystick Variables
@@ -64,7 +69,7 @@ struct JoyPositions {
     String getStringPositions() const {
         char toWrite[30];
         // Pass the string in the right format so the robot can decode it
-        snprintf(toWrite, 30, "Joystick;%i;%i;0\n\r", joyX, joyY);
+        snprintf(toWrite, 30, "<Joystick;%04d;%04d;0>\n", joyX, joyY);
 
         return {toWrite};
     }
@@ -96,11 +101,12 @@ void getButtonPositions();
 
 void handleComm();
 
+void sendMessage(String message);
+
 void drawMap();
 
 void setup() {
-    Serial.begin(9600);
-    Serial1.begin(9600);
+    Serial.begin(38400);
     // write your initialization code here
     // Joystick switch needs to have pullup
     pinMode(B_1, INPUT_PULLUP);
@@ -118,7 +124,7 @@ void setup() {
     pinMode(JOY_X, INPUT);
 
     // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
-    if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { //Ive changed the address //already chill
+    if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
         Serial.println(F("SSD1306 allocation failed"));
         for(;;); // Don't proceed, loop forever
     }
@@ -144,22 +150,30 @@ unsigned long tenMillis = millis();
 
 JoyPositions joyPositions = getJoyPositions();
 
+int i = 48;
 void handleAsync() {
     // Doing 10 micros for encoder
-    if (millis() > tenMillis + 200) {
+    if (millis() > tenMillis + 1000) {
         tenMillis = millis();
 
-//        Serial1.print(getJoyPositions().getStringPositions());
+//        Serial.write(i);
+//        if (i >= 90) {
+//            i = 48;
+//        } else {
+//            i++;
+//        }
 
-        if (joyPositions.needsUpdate()) {
-            // If the joy position was updated, send that over bluetooth
-            Serial.print(joyPositions.getStringPositions());
-            Serial1.print(joyPositions.getStringPositions());
-        }
+//        if (joyPositions.needsUpdate()) {
+//            // If the joy position was updated, send that over bluetooth
+//            //Serial.print(joyPositions.getStringPositions());
+//            Serial.print(joyPositions.getStringPositions());
+//        }
+        joyPositions.needsUpdate();
+        Serial.print(joyPositions.getStringPositions());
+
         //getButtonPositions();
 
         Serial.flush();
-        Serial1.flush();
 
         handleComm();
         drawMap();
@@ -189,64 +203,99 @@ void getButtonPositions() {
     String command = "";
 
     if (digitalRead(B_4) == LOW) {
-        command = "Button:Up\n\r";
-
-    } else if (digitalRead(B_5) == LOW) {
-        command = "Button:Down\r\n";
-
-    } else if (digitalRead(B_6) == LOW) {
-        command = "Button:Left\r\n";
-
-    } else if (digitalRead(B_7) == LOW) {
-        command = "Button:Right\r\n";
+        command = "<Joystick;512;512;0>\n";
 
     }
+//    else if (digitalRead(B_5) == LOW) {
+//        command = "Button:Down\r";
+//
+//    } else if (digitalRead(B_6) == LOW) {
+//        command = "Button:Left\r";
+//
+//    } else if (digitalRead(B_7) == LOW) {
+//        command = "Button:Right\r";
+//
+//    }
 
-    if (command != "")
+    if (command != "") {
         Serial.print(command);
-        Serial1.print(command);
+    }
 }
 
 bool checkMessage() {
 //  Serial.println(msgBuf);
     char *p = msgBuf;
-    String str;
+    char *token;
     int cnt = 0;
 // while ((str = strtok_r(p, ";", &p)) != NULL) // delimiter is the semicolon
-    str = strtok_r(p, ";", &p);
-    //Serial.println(str);
-    if (str == "path") {
-        while ((str = strtok_r(p, ";", &p)) != nullptr) {
-            if (cnt == 0) {          //path x value
-                xLocation = str.toFloat();
-            } else if (cnt == 1) {    //path y value
-                yLocation = str.toFloat();
-            }
-            cnt++;
-        }
-//        Serial.println("Joy ");
-//        Serial.print(joystick[0]);
-//        Serial.print(" ");
-//        Serial.print(joystick[1]);
-//        Serial.print(" ");
-//        Serial.println(joystick[2]);
-    } else if (str == "Command") {
 
-    } else if (str == "Message") {
-        while ((str = strtok_r(p, ";", &p)) != nullptr) {
-            Serial.print("[");
-            Serial.print(str);
-            Serial.println("]");
+// Read until a < is found - indicates the start of the command
+    int mSize = 0;
+    while (mSize < ATR_PROTOCOL_MAX_BUF_SIZE) {
+        if (*p == '<') {
+            // Found the start of the command
+            // Advance one more char to get it ready for parsing the data
+            p++;
+            break;
+        }
+        else p++;
+
+        mSize++;
+    }
+
+    if (mSize == ATR_PROTOCOL_MAX_BUF_SIZE) return false;
+
+    // Initialize a temporary buffer to hold the information
+    char tempBuf[ATR_PROTOCOL_MAX_BUF_SIZE] = {0};
+    int tempIdx = 0;
+
+    // Copy all the contents of the message until we hit the closing character to another string
+    while (*p != '>') {
+        // If '>' is never found, throw everything
+        if (*p == '\0') {
+            memset(msgBuf, 0, ATR_PROTOCOL_MAX_BUF_SIZE);
+            memset(tempBuf, 0, ATR_PROTOCOL_MAX_BUF_SIZE);
+            break;
         }
 
+        tempBuf[tempIdx] = *p;
+        tempIdx++;
+        p++;
+    }
+
+    memset(msgBuf, 0, ATR_PROTOCOL_MAX_BUF_SIZE);
+
+    token = strtok(tempBuf, ";");
+
+    // Check the string returned by the robot for all the data
+    while (token != nullptr) {
+        if (strcmp(token, "path") == 0) {
+            // If the string reads path, get the next two coordinates to figure out where we are
+            token = strtok(nullptr, ";");
+            xLocation = atoi(token);
+            token = strtok(nullptr, ";");
+            yLocation = atoi(token);
+        } else if (strcmp(token, "orient") == 0) {
+
+        } else if (strcmp(token, "linear") == 0) {
+
+        } else if (strcmp(token, "angular") == 0) {
+
+        } else if (strcmp(token, "totdist") == 0) {
+
+        }
+
+        // Get the next token
+        token = strtok(nullptr, ";");
     }
 }
 
 void handleComm() {
-    while (Serial1.available() > 0){
-        char tmpChar = Serial1.read();
+    while (Serial.available() > 0){
+        char tmpChar = Serial.read();
+        Serial.write(tmpChar);
         if (msgBufPnt >= ATR_PROTOCOL_MAX_BUF_SIZE){
-            Serial.println("Message Overflow");
+            //Serial.println("Message Overflow");
             if ((tmpChar != '\n') || (tmpChar != '\r')){
                 msgBuf[0] = tmpChar;
                 msgBufPnt = 1;
@@ -264,7 +313,16 @@ void handleComm() {
     }
 }
 
+void sendMessage(String message) {
+    int index = 0;
+    for (char c : message) {
+        Serial.write(c);
+        delay(1);
+    }
+    Serial.write('\r');
+}
+
 void drawMap() {
-    display.drawPixel(SCREEN_WIDTH/2 + xLocation, SCREEN_HEIGHT/2 + yLocation, SSD1306_WHITE);
+    display.drawPixel((SCREEN_WIDTH/2) + (xLocation/2), (SCREEN_HEIGHT/2) + (yLocation/2), SSD1306_WHITE);
     display.display();
 }
